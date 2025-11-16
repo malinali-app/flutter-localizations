@@ -29,3 +29,6 @@ migrate_working_dir/
 .flutter-plugins
 .flutter-plugins-dependencies
 build/
+/USAGE.md
+/INTEGRATION_PLAN.md
+/run_conversion.bat
