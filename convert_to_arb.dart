@@ -5,10 +5,15 @@ import 'dart:io';
 import 'dart:convert';
 
 /// Maps ISO 639-3 (alpha3) codes to ISO 639-1/639-2 (alpha2) codes
-Map<String, String> loadLanguageCodeMapping(String dictionaryPath) {
+/// Also returns set of all valid language codes from dictionary
+MapEntry<Map<String, String>, Set<String>> loadLanguageCodeMapping(String dictionaryPath) {
   final mapping = <String, String>{};
+  final validCodes = <String>{};
   final file = File(dictionaryPath);
   final lines = file.readAsLinesSync();
+  
+  // Codes to exclude
+  final excludedCodes = {'aeb', 'acm', 'bo', 'ga'};
   
   // Skip header
   for (var i = 1; i < lines.length; i++) {
@@ -18,11 +23,23 @@ Map<String, String> loadLanguageCodeMapping(String dictionaryPath) {
       final alpha3 = parts[1].trim();
       if (alpha2.isNotEmpty && alpha3.isNotEmpty) {
         mapping[alpha3] = alpha2;
+        // Add both codes to valid set (if not excluded)
+        if (!excludedCodes.contains(alpha2)) {
+          validCodes.add(alpha2);
+        }
+        if (!excludedCodes.contains(alpha3)) {
+          validCodes.add(alpha3);
+        }
+      } else if (alpha3.isNotEmpty && alpha2.isEmpty) {
+        // Only alpha3 code (e.g., arz, pes, bho)
+        if (!excludedCodes.contains(alpha3)) {
+          validCodes.add(alpha3);
+        }
       }
     }
   }
   
-  return mapping;
+  return MapEntry(mapping, validCodes);
 }
 
 /// Extracts locale information from filename
@@ -352,10 +369,9 @@ String generateWidgetsArb(
 }
 
 /// Generates ARB filename from locale info
+/// Always generates base language filename (without script code)
 String generateArbFilename(String prefix, String languageCode, String? scriptCode) {
-  if (scriptCode != null) {
-    return '${prefix}_${languageCode}_$scriptCode.arb';
-  }
+  // Always generate base language filename (without script code)
   return '${prefix}_$languageCode.arb';
 }
 
@@ -367,8 +383,11 @@ void main(List<String> args) {
   
   // Step 1: Load language code mapping
   print('\n[Step 1] Loading language code mapping from dictionary.tsv...');
-  final codeMapping = loadLanguageCodeMapping('dictionary.tsv');
+  final mappingResult = loadLanguageCodeMapping('dictionary.tsv');
+  final codeMapping = mappingResult.key;
+  final validLanguageCodes = mappingResult.value;
   print('✓ Loaded ${codeMapping.length} language code mappings');
+  print('✓ Valid language codes: ${validLanguageCodes.length} (excluding: aeb, acm, bo, ga)');
   
   // Step 2: Load English ARB templates
   print('\n[Step 2] Loading English ARB templates...');
@@ -428,7 +447,9 @@ void main(List<String> args) {
   // Step 5: Process each file
   print('\n[Step 5] Processing Dart files and generating ARB files...');
   final incompleteTranslations = <String, List<String>>{};
+  final processedLanguageCodes = <String>{}; // Track processed language codes to avoid duplicates
   int processed = 0;
+  int skipped = 0;
   
   for (var dartFile in dartFiles) {
     final filename = dartFile.path.split(Platform.pathSeparator).last;
@@ -439,6 +460,24 @@ void main(List<String> args) {
       final languageCode = locale.key;
       final scriptCode = locale.value;
       
+      // Only process languages from dictionary.tsv (and exclude specific codes)
+      if (!validLanguageCodes.contains(languageCode)) {
+        skipped++;
+        if (skipped <= 5 || skipped % 10 == 0) {
+          print('  Skipping $filename (not in dictionary.tsv or excluded)');
+        }
+        continue;
+      }
+      
+      // Skip if we've already processed this language code (only one ARB file per language)
+      if (processedLanguageCodes.contains(languageCode)) {
+        skipped++;
+        continue;
+      }
+      
+      // Mark this language code as processed
+      processedLanguageCodes.add(languageCode);
+      
       // Parse Dart file
       final translations = parseDartFile(dartFile);
       
@@ -447,26 +486,23 @@ void main(List<String> args) {
           determineScriptCategory(scriptCode, languageCode);
       final timeOfDayFormat = translations['_timeOfDayFormat'] as String? ?? 'h:mm a';
       
-      // Generate Material ARB
+      // Generate Material ARB - always use base language filename (no script code)
       final materialArb = generateMaterialArb(
         materialEnTemplate,
         translations,
         scriptCategory,
         timeOfDayFormat,
       );
-      // Always generate base language filename (without script code)
       final materialFilename = generateArbFilename('material', languageCode, null);
       File('${arbOutputDir.path}/$materialFilename').writeAsStringSync(materialArb);
       
-      // Generate Cupertino ARB
+      // Generate Cupertino ARB - always use base language filename (no script code)
       final cupertinoArb = generateCupertinoArb(cupertinoEnTemplate, translations);
-      // Always generate base language filename (without script code)
       final cupertinoFilename = generateArbFilename('cupertino', languageCode, null);
       File('${arbOutputDir.path}/$cupertinoFilename').writeAsStringSync(cupertinoArb);
       
-      // Generate Widgets ARB
+      // Generate Widgets ARB - always use base language filename (no script code)
       final widgetsArb = generateWidgetsArb(widgetsEnTemplate, translations);
-      // Always generate base language filename (without script code)
       final widgetsFilename = generateArbFilename('widgets', languageCode, null);
       File('${arbOutputDir.path}/$widgetsFilename').writeAsStringSync(widgetsArb);
       
@@ -502,7 +538,7 @@ void main(List<String> args) {
     }
   }
   
-  print('✓ Processed ${dartFiles.length} files');
+  print('✓ Processed ${processed} files (skipped ${skipped} files not in dictionary.tsv)');
   
   // Step 6: Generate report
   print('\n[Step 6] Generating incomplete translations report...');
@@ -532,17 +568,8 @@ void main(List<String> args) {
   print('\n$separator');
   print('Conversion complete!');
   print(separator);
-  
-  // Count actual files generated (including base language files for script-specific locales)
-  final actualFileCount = Directory(arbOutputDir.path)
-      .listSync()
-      .whereType<File>()
-      .where((f) => f.path.endsWith('.arb'))
-      .length;
-  
   print('\nGenerated ARB files in: arb_output/');
-  print('Total files: $actualFileCount (includes base language files for script-specific locales)');
-  print('Locales processed: ${dartFiles.length}');
+  print('Total files: ${dartFiles.length * 3} (Material, Cupertino, Widgets)');
   print('Locales with incomplete translations: ${incompleteTranslations.length}');
   print('\nNext steps:');
   print('1. Review ARB files in arb_output/');

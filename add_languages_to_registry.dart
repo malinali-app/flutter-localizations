@@ -1,6 +1,16 @@
 // Script to add missing language codes to Flutter's language subtag registry
 import 'dart:io';
 
+/// Extracts description from existing registry entry
+String? extractDescriptionFromRegistry(String registryContent, String code) {
+  final pattern = RegExp(
+    r'Subtag: $code\nDescription: (.+)\n',
+    multiLine: true,
+  );
+  final match = pattern.firstMatch(registryContent);
+  return match?.group(1);
+}
+
 void main() {
   final registryFile = File('../flutter/dev/tools/localization/language_subtag_registry.dart');
   final dictionaryFile = File('dictionary.tsv');
@@ -16,10 +26,14 @@ void main() {
   }
   
   // Read existing registry
-  final registryContent = registryFile.readAsStringSync();
+  var registryContent = registryFile.readAsStringSync();
+  
+  // Get current date in YYYY-MM-DD format
+  final now = DateTime.now();
+  final currentDate = '${now.year}-${now.month.toString().padLeft(2, '0')}-${now.day.toString().padLeft(2, '0')}';
   
   // Read dictionary to get language names
-  // Maps both alpha2 and alpha3 codes to language names
+  // Maps both alpha2 and alpha3 codes to full language names from nameEng column
   final dictionary = <String, String>{};
   final lines = dictionaryFile.readAsLinesSync();
   for (var i = 1; i < lines.length; i++) {
@@ -27,14 +41,13 @@ void main() {
     if (parts.length >= 3) {
       final alpha2 = parts[0].trim();
       final alpha3 = parts[1].trim();
-      final name = parts[2].trim();
-      // Extract just the language name (before any additional info)
-      final languageName = name.split(RegExp(r'\s+'))[0];
+      final nameEng = parts[2].trim();
+      // Use the full nameEng (e.g., "Mesopotamian Arabic", "Northern Uzbek", "Standard Malay")
       if (alpha2.isNotEmpty) {
-        dictionary[alpha2] = languageName;
+        dictionary[alpha2] = nameEng;
       }
       if (alpha3.isNotEmpty) {
-        dictionary[alpha3] = languageName;
+        dictionary[alpha3] = nameEng;
       }
     }
   }
@@ -61,12 +74,36 @@ void main() {
     }
   }
   
-  // Check which codes are missing from registry
+  // Find all existing language codes in registry (any date)
+  // IMPORTANT: Only match base language codes, not script-specific ones (which contain underscores)
+  final existingCodes = <String>{};
+  final existingPattern = RegExp(r'Type: language\nSubtag: ([a-z]{2,3})\nDescription: (.+)\nAdded: (\d{4}-\d{2}-\d{2})', multiLine: true);
+  for (final match in existingPattern.allMatches(registryContent)) {
+    final code = match.group(1)!;
+    // Only add codes that don't contain underscores (script codes are separate)
+    if (!code.contains('_') && !code.contains('-')) {
+      existingCodes.add(code);
+    }
+  }
+  
+  print('Found ${existingCodes.length} existing language codes in registry');
+  
+  // Filter our codes: remove any with underscores (script codes) and check against existing
   final missingCodes = <String>[];
   for (final code in ourCodes) {
     if (code == 'en') continue; // Skip English
-    if (!registryContent.contains('Subtag: $code\n')) {
+    
+    // Skip codes with underscores or hyphens (these are script-specific, not base language codes)
+    if (code.contains('_') || code.contains('-')) {
+      print('  Skipping $code (contains script code separator)');
+      continue;
+    }
+    
+    // Check if code already exists in registry
+    if (!existingCodes.contains(code)) {
       missingCodes.add(code);
+    } else {
+      print('  $code already exists in registry');
     }
   }
   
@@ -85,12 +122,28 @@ void main() {
   final newEntries = StringBuffer();
   
   for (final code in missingCodes.toList()..sort()) {
-    final name = dictionary[code] ?? code.toUpperCase();
+    String description;
+    
+    // First try dictionary.tsv
+    if (dictionary.containsKey(code)) {
+      description = dictionary[code]!;
+    } else {
+      // Try to extract from existing registry (for codes that might already exist)
+      final existingDesc = extractDescriptionFromRegistry(registryContent, code);
+      if (existingDesc != null) {
+        description = existingDesc;
+      } else {
+        // Fallback: use code in uppercase (shouldn't happen if dictionary is complete)
+        description = code.toUpperCase();
+        print('  WARNING: No description found for $code, using fallback');
+      }
+    }
+    
     newEntries.writeln('%%');
     newEntries.writeln('Type: language');
     newEntries.writeln('Subtag: $code');
-    newEntries.writeln('Description: $name');
-    newEntries.writeln('Added: 2024-01-01');
+    newEntries.writeln('Description: $description');
+    newEntries.writeln('Added: $currentDate');
   }
   
   // Insert before the closing '''
@@ -109,6 +162,7 @@ void main() {
   
   print('\n✓ Added ${missingCodes.length} language codes to registry!');
   print('  File: ${registryFile.path}');
+  print('  Date used: $currentDate');
   print('\nYou can now run the generator again.');
 }
 
